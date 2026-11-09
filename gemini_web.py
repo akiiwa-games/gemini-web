@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -36,7 +37,25 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-CHROME = Path(os.environ.get("GEMINI_WEB_CHROME", r"C:\Program Files\Google\Chrome\Application\chrome.exe"))
+def discover_chrome() -> Path:
+    """Respect the explicit executable, then discover system, user and PATH installs."""
+    override = os.environ.get("GEMINI_WEB_CHROME")
+    if override:
+        return Path(override).expanduser()
+    for key in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(key)
+        if base:
+            candidate = Path(base) / "Google/Chrome/Application/chrome.exe"
+            if candidate.is_file():
+                return candidate
+    for name in ("chrome", "chrome.exe", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        executable = shutil.which(name)
+        if executable:
+            return Path(executable)
+    return Path("chrome.exe")  # start() reports the missing installation without launching anything.
+
+
+CHROME = discover_chrome()
 DATA_DIR = Path(os.environ.get("GEMINI_WEB_DATA_DIR",
                                Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "Gemini Web Bridge"))
 PROFILE = DATA_DIR / "chrome-profile"
@@ -44,7 +63,18 @@ HOME = Path(os.environ.get("GEMINI_WEB_HOME", Path.home() / ".gemini-web-bridge"
 DESCRIPTOR = HOME / "runtime" / "browser.json"
 DOWNLOADS = HOME / "downloads"
 LOG = Path.home() / ".route-manager" / "gemini-web.log"
-CDP_PORT = int(os.environ.get("GEMINI_WEB_CDP_PORT", "17849"))
+def _cdp_port() -> int:
+    root = Path(__file__).resolve().parents[1]
+    try:
+        if str(root) not in sys.path:
+            sys.path.append(str(root))
+        from agentcompass.ports import get
+        return get("gemini_web")
+    except Exception:
+        return int(os.environ.get("GEMINI_WEB_CDP_PORT", "17849"))
+
+
+CDP_PORT = _cdp_port()
 CDP_ENDPOINT = f"http://127.0.0.1:{CDP_PORT}"
 SITES = {
     "gemini": "https://gemini.google.com/app",
