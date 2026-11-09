@@ -22,7 +22,8 @@ Used both as a standalone browser automation toolkit and as the local Gemini Web
 | :--- | :--- |
 | [`gemini_web.py`](gemini_web.py) | Browser lifecycle manager (`status`, `start`, `show`, `stop`) and Playwright loopback CDP helper (`connect`, `new_task_page`, `needs_login`, `bring_to_front`). |
 | [`omni.py`](omni.py) | Gemini Omni 1.1 Flash (`gemini-omni-1.1-flash`) runner for Google AI Studio: composes role-tagged prompts, sets aspect ratio / resolution / duration, attaches source and reference media without OS file dialogs, runs generation, and extracts the output `.mp4`. |
-| [`test_gemini_web.py`](test_gemini_web.py), [`test_omni.py`](test_omni.py) | Unit test suites for browser lifecycle, CDP attachment, prompt/tag composition, and video runner state transitions. |
+| [`colab_workstation.py`](colab_workstation.py) | Dual-Ultra Colab + Google Drive workstation controller: per-account onboarding, bootstrap notebook generator, consent-safe Colab launch and A/B handoff. |
+| [`test_gemini_web.py`](test_gemini_web.py), [`test_chrome_discovery.py`](test_chrome_discovery.py), [`test_omni.py`](test_omni.py), [`test_colab_workstation.py`](test_colab_workstation.py) | Unit test suites for browser lifecycle, multi-account isolation, CDP attachment, prompt/tag composition, bootstrap generation, and runner state transitions. |
 
 ---
 
@@ -32,10 +33,12 @@ Used both as a standalone browser automation toolkit and as the local Gemini Web
 
 ```powershell
 python -X utf8 gemini_web.py status                              # JSON health report, or "not running"
-python -X utf8 gemini_web.py start [--show] [--site aistudio]    # Start the Chrome bridge (gemini | aistudio | flow)
-python -X utf8 gemini_web.py show [gemini|aistudio|flow]         # Open a site tab and bring the window to the front
+python -X utf8 gemini_web.py start [--show] [--site aistudio]    # Start the Chrome bridge (gemini | aistudio | flow | colab | drive)
+python -X utf8 gemini_web.py show [gemini|aistudio|flow|colab|drive]  # Open a site tab and bring the window to the front
 python -X utf8 gemini_web.py stop                                # Gracefully stop the dedicated Chrome instance
 ```
+
+Every command accepts `--account <name>` (also `--account=<name>`). See [Multiple Google Accounts](#multiple-google-accounts).
 
 ### Python Playwright API
 
@@ -62,6 +65,32 @@ with sync_playwright() as p:
 | `GEMINI_WEB_DATA_DIR` | `%LOCALAPPDATA%\Gemini Web Bridge` | Parent directory for `chrome-profile/` |
 | `GEMINI_WEB_HOME` | `~/.gemini-web-bridge` | Runtime descriptor (`runtime/browser.json`), `downloads/`, and `runs/` |
 | `GEMINI_WEB_CDP_PORT` | `17849` | Loopback Chrome DevTools Protocol port (`127.0.0.1:<port>`) |
+| `GEMINI_WEB_CDP_PORT_<ACCOUNT>` | see below | CDP port of a named account (name upper-cased, `-` → `_`, e.g. `GEMINI_WEB_CDP_PORT_ULTRA_A`) |
+
+### Multiple Google Accounts
+
+Without `--account` (or with `--account default`) the bridge is exactly the single profile above, so `omni.py`, the AgentCompass tray and existing scripts are unaffected. A named account (`[A-Za-z0-9_-]{1,64}`) gets its own Chrome, so two accounts never share cookies, `authuser=0` sessions, `--user-data-dir` or `--remote-debugging-port`:
+
+| | Default | Named account `<acct>` |
+| :--- | :--- | :--- |
+| Chrome profile | `<DATA_DIR>/chrome-profile` | `<DATA_DIR>/accounts/<acct>/chrome-profile` |
+| Runtime descriptor | `<HOME>/runtime/browser.json` | `<HOME>/accounts/<acct>/runtime/browser.json` |
+| Downloads | `<HOME>/downloads` | `<HOME>/accounts/<acct>/downloads` |
+| CDP port | `17849` | `ultra_a` → `17850`, `ultra_b` → `17852`, others → stable hash in `17860–17959` |
+| Window title | `Gemini Web` | `Gemini Web (<acct>)` |
+
+`17851` is skipped on purpose: AgentCompass's `ports.py` reserves it for its account-login Chrome. Port precedence for a named account: `GEMINI_WEB_CDP_PORT_<ACCOUNT>`, then `<HOME>/accounts.json` (`{"accounts": {"lab-1": {"port": 18001}}}`), then the named slots, then the hash.
+
+```powershell
+python -X utf8 gemini_web.py show drive --account ultra_a
+python -X utf8 gemini_web.py status --account ultra_b
+```
+
+```python
+browser, page = gemini_web.new_task_page(p, "https://colab.research.google.com/", account="ultra_a")
+```
+
+`health()`, `start()`, `open_site()`, `stop()`, `ensure_running()`, `connect()` and `new_task_page()` all take `account=`.
 
 ---
 
@@ -122,8 +151,50 @@ Each run writes its artifacts to `--out` (default `~/.gemini-web-bridge/runs/<ti
 
 ---
 
+## Dual-Ultra Colab + Google Drive Workstation (`colab_workstation.py`)
+
+Two Google AI Ultra accounts (`ultra_a`, `ultra_b`) each run Colab with their own Compute Units and background execution, and share one Drive folder, `/MyDrive/AI_Workstation`, through a Drive shortcut. Each account is driven through its own bridge Chrome (`--account`).
+
+```powershell
+# Bridges and Colab tabs of the configured accounts (default ultra_a,ultra_b; override with COLAB_WORKSTATION_ACCOUNTS=a,b)
+python -X utf8 colab_workstation.py status [--account ultra_a]
+
+# Once per account: opens Drive + Colab in that account's Chrome; sign in and add the AI_Workstation shortcut
+python -X utf8 colab_workstation.py onboard --account ultra_a
+
+# Generate bootstrap_workstation.ipynb, workstation_bootstrap.py and workstation_bootstrap.sh; upload them to /MyDrive/AI_Workstation/
+python -X utf8 colab_workstation.py init-bootstrap --out .\bootstrap `
+    --server-cmd "vllm serve Qwen/Qwen3-8B --port {port}" --server-port 8000 --tunnel cloudflared
+
+# Open the notebook in ultra_a's Chrome, check the runtime, Run all (or --prepare-only to only inspect)
+python -X utf8 colab_workstation.py launch --account ultra_a --notebook-url <colab-url> [--out <run-dir>] [--prepare-only]
+
+# Rolling handoff: bring ultra_b up first, verify it, write a receipt; ultra_a keeps serving until you retire it
+python -X utf8 colab_workstation.py handoff --from-account ultra_a --to-account ultra_b --notebook-url <colab-url> `
+    [--registry-dir "G:\My Drive\AI_Workstation\registry"]
+```
+
+### What the bootstrap notebook does
+
+1. `drive.mount('/content/drive')` and verifies `/content/drive/MyDrive/AI_Workstation` (creates `registry/`, `env/`, `models/`, `logs/`).
+2. Copies `env/*.tar.gz|*.tar|*.zip` archives and `models/*` from Drive to the VM's local disk `/content/local_cache` (one sequential read instead of thousands of small FUSE reads), sets `HF_HOME` / `HF_HUB_CACHE` under it and links `/content/models`.
+3. Starts the configured server command (`{port}` is substituted), waits for the port, exposes it through `cloudflared` (quick tunnel URL parsed from its output), a custom command (EasyTier / Tailscale; give `TUNNEL_CMD` and `TUNNEL_URL`) or `none`.
+4. Writes and heartbeats `/content/drive/MyDrive/AI_Workstation/registry/<account>.json` with `account`, `started_at`, `updated_at`, `gpu_name`, `server_port`, `tunnel_url` and `status` (`starting` → `running`, or `server_exited`).
+
+The account is the `ACCOUNT` form field, or `auto`: `WORKSTATION_ACCOUNT`, else the first line of `/MyDrive/.ai_workstation_account` in that account's own My Drive (not the shared folder), else `unknown`.
+
+### Launch states (`<out>/state.json`)
+
+- `launched` — Run all (Ctrl+F9) was sent and no blocker appeared within `--observe-seconds`; `runtime` reports `connected`, `gpu` and visible `compute_units` when Colab shows them.
+- `prepared_in_browser` — `--prepare-only`: notebook opened and runtime inspected, nothing executed.
+- `login_required` — signed out, Colab's sign-in link, or a Google security challenge (`reason`: `signed_out`, `colab_signed_out`, `security_challenge`).
+- `consent_required` — Drive permission dialog, OAuth consent popup, "not authored by Google" warning or a CAPTCHA (`reason`: `drive_mount_consent`, `oauth_consent`, `untrusted_notebook`, `captcha`).
+- `unexpected_page` — the URL did not land on Colab.
+
+Blocked states bring the relevant tab or popup to the front and save `blocked.png`; nothing is clicked. The account owner finishes the step and re-runs. `handoff` writes `handoff.json` with `ready`, the target's state and, with `--registry-dir`, the target's registry record (must be `running` and updated after the handoff began). It never stops the source runtime.
+
 ## Tests
 
 ```powershell
-python -X utf8 -m unittest test_gemini_web test_omni
+python -X utf8 -m unittest discover -s . -p "test_*.py" -v
 ```
