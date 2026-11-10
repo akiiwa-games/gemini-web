@@ -204,5 +204,17 @@ class SiteTests(unittest.TestCase):
         self.assertIn("127.0.0.1:17850/json/activate/t1", urlopen.call_args.args[0])
 
 
+class PluginLoadTests(unittest.TestCase):
+    def test_loads_like_the_agentcompass_tray(self):
+        """The tray execs this file via spec_from_file_location without registering it in sys.modules."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("gemini_web_tray_copy", Path(gemini_web.__file__))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.account_config("ultra_a").name, "ultra_a")
+        self.assertTrue(callable(module.health) and callable(module.main_pid))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,9 +41,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 def discover_chrome() -> Path:
     """Respect the explicit executable, then discover system, user and PATH installs."""
@@ -109,9 +108,12 @@ class BridgeError(RuntimeError):
     pass
 
 
-@dataclass(frozen=True)
-class AccountConfig:
-    """Everything that must differ between two Google accounts' bridges."""
+class AccountConfig(NamedTuple):
+    """Everything that must differ between two Google accounts' bridges.
+
+    A NamedTuple, not a dataclass: AgentCompass's tray loads this file with spec_from_file_location
+    without registering it in sys.modules, and @dataclass under `from __future__ import annotations`
+    looks the module up there and crashes the import."""
 
     name: str
     profile: Path
