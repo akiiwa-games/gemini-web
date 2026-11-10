@@ -471,6 +471,36 @@ def new_task_page(playwright: Any, url: str, timeout_ms: int = 60000,
     return browser, page
 
 
+def minimize_windows(cdp: Any) -> None:
+    """Minimize every bridge window (Chrome ignores --start-minimized and STARTUPINFO for its first window)."""
+    seen: set[int] = set()
+    for target in cdp.send("Target.getTargets")["targetInfos"]:
+        if target["type"] != "page":
+            continue
+        window = cdp.send("Browser.getWindowForTarget", {"targetId": target["targetId"]})["windowId"]
+        if window not in seen:
+            seen.add(window)
+            cdp.send("Browser.setWindowBounds", {"windowId": window, "bounds": {"windowState": "minimized"}})
+
+
+def new_background_page(playwright: Any, url: str, timeout_ms: int = 60000,
+                        account: str | None = None) -> tuple[Any, Any]:
+    """Like new_task_page, but the tab opens without activating the window, and a bridge that was down
+    is minimized right after it starts. For work driven purely over CDP (OAuth consent clicks)."""
+    cfg = account_config(account)
+    was_up = bool(health(**_named(cfg)))
+    browser, context = connect(playwright, **_named(cfg))
+    cdp = browser.new_browser_cdp_session()
+    if not was_up:
+        minimize_windows(cdp)
+    # Playwright's new_page() activates the tab and restores a minimized window; a background target does not.
+    with context.expect_page(timeout=timeout_ms) as created:
+        cdp.send("Target.createTarget", {"url": "about:blank", "background": True})
+    page = created.value
+    page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+    return browser, page
+
+
 def needs_login(page: Any) -> bool:
     url = page.url.lower()
     return "accounts.google.com" in url or "/signin" in url or "servicelogin" in url

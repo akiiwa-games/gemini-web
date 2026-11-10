@@ -155,6 +155,21 @@ class AccountTests(unittest.TestCase):
         playwright.chromium.connect_over_cdp.assert_called_once_with("http://127.0.0.1:17852")
         context.new_page.return_value.goto.assert_called_once()
 
+    def test_background_page_opens_unactivated_tab_and_minimizes_a_cold_bridge(self):
+        playwright = mock.MagicMock()
+        browser = playwright.chromium.connect_over_cdp.return_value
+        cdp = browser.new_browser_cdp_session.return_value
+        cdp.send.side_effect = lambda method, params=None: {
+            "Target.getTargets": {"targetInfos": [{"type": "page", "targetId": "t1"},
+                                                  {"type": "service_worker", "targetId": "t2"}]},
+            "Browser.getWindowForTarget": {"windowId": 7}}.get(method, {})
+        with mock.patch.object(gemini_web, "start"), mock.patch.object(gemini_web, "health", return_value=None):
+            gemini_web.new_background_page(playwright, "https://accounts.google.com/x", account="ultra_b")
+        calls = [c.args for c in cdp.send.call_args_list]
+        self.assertIn(("Browser.setWindowBounds", {"windowId": 7, "bounds": {"windowState": "minimized"}}), calls)
+        self.assertIn(("Target.createTarget", {"url": "about:blank", "background": True}), calls)
+        browser.contexts[0].new_page.assert_not_called()
+
     def test_named_profile_preferences_use_the_accounts_downloads(self):
         gemini_web._prepare_profile(account="ultra_a")
         cfg = gemini_web.account_config("ultra_a")

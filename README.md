@@ -22,8 +22,8 @@ Used both as a standalone browser automation toolkit and as the local Gemini Web
 | :--- | :--- |
 | [`gemini_web.py`](gemini_web.py) | Browser lifecycle manager (`status`, `start`, `show`, `stop`) and Playwright loopback CDP helper (`connect`, `new_task_page`, `needs_login`, `bring_to_front`). |
 | [`omni.py`](omni.py) | Gemini Omni 1.1 Flash (`gemini-omni-1.1-flash`) runner for Google AI Studio: composes role-tagged prompts, sets aspect ratio / resolution / duration, attaches source and reference media without OS file dialogs, runs generation, and extracts the output `.mp4`. |
-| [`colab_workstation.py`](colab_workstation.py) | Dual-Ultra Colab + Google Drive workstation controller: per-account onboarding, bootstrap notebook generator, consent-safe Colab launch and A/B handoff. |
-| [`test_gemini_web.py`](test_gemini_web.py), [`test_chrome_discovery.py`](test_chrome_discovery.py), [`test_omni.py`](test_omni.py), [`test_colab_workstation.py`](test_colab_workstation.py) | Unit test suites for browser lifecycle, multi-account isolation, CDP attachment, prompt/tag composition, bootstrap generation, and runner state transitions. |
+| [`colab_workstation.py`](colab_workstation.py) | On-demand Colab GPU workstation for 1–5 accounts on the official Colab CLI: per-account login, background consent in the account's bridge, HF/Drive staging profiles, idle auto-release. |
+| [`test_gemini_web.py`](test_gemini_web.py), [`test_chrome_discovery.py`](test_chrome_discovery.py), [`test_omni.py`](test_omni.py), [`test_colab_workstation.py`](test_colab_workstation.py) | Unit test suites for browser lifecycle, multi-account isolation, CDP attachment, prompt/tag composition, consent automation boundaries, and staging/idle flows. |
 
 ---
 
@@ -151,47 +151,65 @@ Each run writes its artifacts to `--out` (default `~/.gemini-web-bridge/runs/<ti
 
 ---
 
-## Dual-Ultra Colab + Google Drive Workstation (`colab_workstation.py`)
+## Colab GPU Workstation (`colab_workstation.py`)
 
-Two Google AI Ultra accounts (`ultra_a`, `ultra_b`) each run Colab with their own Compute Units and background execution, and share one Drive folder, `/MyDrive/AI_Workstation`, through a Drive shortcut. Each account is driven through its own bridge Chrome (`--account`).
+On-demand Colab runtimes for 1–5 Google accounts, driven by the official [Colab CLI](https://github.com/googlecolab/google-colab-cli) (`google-colab-cli`, native on Windows). Nothing stays online: pick an account, bring a runtime up, run jobs, bring it down. A detached watcher releases a runtime left idle longer than `--idle-minutes` (default 20; `0` turns it off); a running job holds it off until the job ends or its timeout passes.
+
+### Runtime lifetime and job timeouts
+
+- Files on the VM disk (staged weights, outputs) live as long as the runtime; any number of `run`s can reuse them.
+- Colab itself deletes a runtime once no code has run for a while (unpublished; idle timeouts only count while nothing executes; measured 2026-11-09: an idle CPU runtime on akiiwa's account was reclaimed after 179–182 min) and at its maximum lifetime (Pro+: up to 24 h of continuous execution). The watcher only releases earlier to save compute units; raise `--idle-minutes` or pass `0` to leave it to Colab. A `run` on a runtime Colab has reclaimed fails with `RuntimeLost` and drops the session record; `up` again.
+- `run --timeout` is a wall-clock limit enforced here. colab-cli's own `--timeout` only bounds a stretch without output, and once it trips the CLI hangs instead of exiting; so at the limit the CLI is killed and the kernel restarted (`JobTimeout`; the VM disk is kept). A second `run` on a session whose job is still running is refused instead of queueing behind it.
 
 ```powershell
-# Bridges and Colab tabs of the configured accounts (default ultra_a,ultra_b; override with COLAB_WORKSTATION_ACCOUNTS=a,b)
-python -X utf8 colab_workstation.py status [--account ultra_a]
+# Once: the CLI in its own venv (<DATA_DIR>/colab-cli; COLAB_CLI overrides)
+python -X utf8 colab_workstation.py install-cli
 
-# Once per account: opens Drive + Colab in that account's Chrome; sign in and add the AI_Workstation shortcut
-python -X utf8 colab_workstation.py onboard --account ultra_a
+# Once per account (max 5): register, open the account's bridge Chrome, sign in there
+python -X utf8 colab_workstation.py onboard --account akiiwa --email akiiwacorps@gmail.com --auto-consent
+python -X utf8 colab_workstation.py login --account akiiwa          # CLI OAuth, finished in the bridge
 
-# Generate bootstrap_workstation.ipynb, workstation_bootstrap.py and workstation_bootstrap.sh; upload them to /MyDrive/AI_Workstation/
-python -X utf8 colab_workstation.py init-bootstrap --out .\bootstrap `
-    --server-cmd "vllm serve Qwen/Qwen3-8B --port {port}" --server-port 8000 --tunnel cloudflared
-
-# Open the notebook in ultra_a's Chrome, check the runtime, Run all (or --prepare-only to only inspect)
-python -X utf8 colab_workstation.py launch --account ultra_a --notebook-url <colab-url> [--out <run-dir>] [--prepare-only]
-
-# Rolling handoff: bring ultra_b up first, verify it, write a receipt; ultra_a keeps serving until you retire it
-python -X utf8 colab_workstation.py handoff --from-account ultra_a --to-account ultra_b --notebook-url <colab-url> `
-    [--registry-dir "G:\My Drive\AI_Workstation\registry"]
+python -X utf8 colab_workstation.py status                           # bridges, CLI login, compute units, sessions
+python -X utf8 colab_workstation.py up --account akiiwa --profile profiles\qwen-image.json --gpu L4 --session img
+python -X utf8 colab_workstation.py run --account akiiwa --session img -f job.py [--timeout 3600]
+python -X utf8 colab_workstation.py down --account akiiwa --session img    # last outputs copy, Drive flush, release
 ```
 
-### What the bootstrap notebook does
+`--account auto` picks the logged-in account with the most compute units and no runtime of its own.
 
-1. `drive.mount('/content/drive')` and verifies `/content/drive/MyDrive/AI_Workstation` (creates `registry/`, `env/`, `models/`, `logs/`).
-2. Copies `env/*.tar.gz|*.tar|*.zip` archives and `models/*` from Drive to the VM's local disk `/content/local_cache` (one sequential read instead of thousands of small FUSE reads), sets `HF_HOME` / `HF_HUB_CACHE` under it and links `/content/models`.
-3. Starts the configured server command (`{port}` is substituted), waits for the port, exposes it through `cloudflared` (quick tunnel URL parsed from its output), a custom command (EasyTier / Tailscale; give `TUNNEL_CMD` and `TUNNEL_URL`) or `none`.
-4. Writes and heartbeats `/content/drive/MyDrive/AI_Workstation/registry/<account>.json` with `account`, `started_at`, `updated_at`, `gpu_name`, `server_port`, `tunnel_url` and `status` (`starting` → `running`, or `server_exited`).
+### Accounts and the browser
 
-The account is the `ACCOUNT` form field, or `auto`: `WORKSTATION_ACCOUNT`, else the first line of `/MyDrive/.ai_workstation_account` in that account's own My Drive (not the shared folder), else `unknown`.
+- Each account has its own colab-cli home `<HOME>/accounts/<acct>/colab-cli` (the CLI keeps `token.json` and `sessions.json` under `USERPROFILE`) and its own bridge Chrome; the CDP port comes from `<HOME>/accounts.json` (slots `17850, 17852, 17853, 17854, 17855`).
+- The browser is needed for two Google consent pages, both opened in the account's bridge as a background tab (a bridge that was down is minimized right after it starts, so its window shows for ~1–2 s and never takes focus): the CLI login (once; the refresh token is reused) and Drive access for **every new runtime** (Colab asks again per VM; within one runtime remounting does not ask).
+- The CLI hard-codes `authuser=0`, which is what breaks Drive mounting in a browser signed in to several accounts (CLI issue #103). The consent URL carries `login_hint`, and the bridge profile holds only its own account.
+- With `--auto-consent` the bridge clicks Google's OAuth consent screens (including "Select all": a Drive grant without all scopes fails with `credential propagation was unsuccessful`). Without it, the bridge window comes to the front and the run waits for the owner. Password / 2-step sign-in, "Verify it's you" and CAPTCHAs are never automated.
 
-### Launch states (`<out>/state.json`)
+### Profiles: what goes where
 
-- `launched` — Run all (Ctrl+F9) was sent and no blocker appeared within `--observe-seconds`; `runtime` reports `connected`, `gpu` and visible `compute_units` when Colab shows them.
-- `prepared_in_browser` — `--prepare-only`: notebook opened and runtime inspected, nothing executed.
-- `login_required` — signed out, Colab's sign-in link, or a Google security challenge (`reason`: `signed_out`, `colab_signed_out`, `security_challenge`).
-- `consent_required` — Drive permission dialog, OAuth consent popup, "not authored by Google" warning or a CAPTCHA (`reason`: `drive_mount_consent`, `oauth_consent`, `untrusted_notebook`, `captcha`).
-- `unexpected_page` — the URL did not land on Colab.
+```json
+{
+  "hf":    [{"repo": "Comfy-Org/Qwen-Image-2.1", "files": ["vae/qwen_image_2.1_vae_bf16.safetensors"],
+             "dest": "/content/models", "gated": false}],
+  "drive": [{"src": "AI_Workstation/loras/style.safetensors", "dest": "/content/models/loras/style.safetensors", "mode": "copy"},
+            {"src": "AI_Workstation/workflows.tar", "dest": "/content/workflows", "mode": "archive"}],
+  "outputs": {"local": "/content/outputs", "drive": "AI_Workstation/outputs"}
+}
+```
 
-Blocked states bring the relevant tab or popup to the front and save `blocked.png`; nothing is clicked. The account owner finishes the step and re-runs. `handoff` writes `handoff.json` with `ready`, the target's state and, with `--registry-dir`, the target's registry record (must be `running` and updated after the handoff began). It never stops the source runtime.
+Measured on a Colab runtime (Qwen-Image 2.1, 17.3 GB, 2026-11-09):
+
+| Path | Throughput | 17.3 GB |
+| :--- | :--- | :--- |
+| Hugging Face → VM disk | 113–158 MB/s | ~2.5 min |
+| VM disk → Drive (write) | 94–111 MB/s | ~3 min + 105 s flush |
+| Drive → VM disk (fresh runtime) | 51–70 MB/s | ~5.4 min |
+
+- **`hf`**: public weights are always downloaded from Hugging Face; keeping a Drive copy only makes startup slower. **Gated** repos (`"gated": true`) need a token: `HF_TOKEN` or `~/.cache/huggingface/token` on this machine is uploaded as a file to the VM's `~/.cache/huggingface/token` (mode 600) before staging. It never goes into code, `colab exec --env`, a notebook or Drive, because colab-cli logs executed code in plain text under `~/.config/colab-cli/history`; uploads log only paths. The VM disk, token included, is wiped when the runtime is released.
+- **`drive`, `mode: copy`**: large private single files (LoRAs, private checkpoints, datasets). A tar gains nothing for already-compressed tensors.
+- **`drive`, `mode: archive`**: trees of many small files (ComfyUI workflows, custom nodes, configs). Drive's FUSE mount pays a round trip per file, so these live on Drive as one `.tar`, extracted on the VM. `pack --src AI_Workstation/workflows --out AI_Workstation/workflows.tar` builds it on a running runtime.
+- **`outputs`**: jobs write to the VM's local disk; after every `run` (failed ones included) new or changed files are copied to `<outputs.drive>/<session>/` on Drive, so a runtime that Colab reclaims on its own loses nothing (`--no-sync` defers this). `down` copies once more, runs `drive.flush_and_unmount()` and only then releases the runtime; if that copy fails, the runtime is kept (`sync_failed_runtime_kept`). Drive is the place results live; `fetch` is only for pulling a single file to this machine.
+
+Runtime disk: ~242 GB free on a CPU runtime (0.08 CU/h); it does not persist across runtimes.
 
 ## Tests
 
