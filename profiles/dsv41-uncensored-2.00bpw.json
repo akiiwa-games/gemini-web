@@ -1,0 +1,44 @@
+{
+  "hf": [
+    {
+      "repo": "AtomicChat/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-GGUF",
+      "files": [
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00002-of-00004.gguf",
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00003-of-00004.gguf"
+      ],
+      "dest": "/content/models/dsv41",
+      "gated": false
+    },
+    {
+      "repo": "ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF",
+      "revision": "cb02422c900df489cea5833e8a92171224059b3c",
+      "files": [
+        "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf"
+      ],
+      "dest": "/content/models/dsv41",
+      "gated": false
+    },
+    {
+      "repo": "AtomicChat/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-GGUF",
+      "files": [
+        "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00004-of-00004.gguf"
+      ],
+      "dest": "/dev/shm/dsv41",
+      "gated": false
+    },
+    {
+      "repo": "unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
+      "revision": "8a6ec9cf118e785a362ea94ee123c61c70553be6",
+      "files": [
+        "UD-Q8_K_XL/DeepSeek-V4.1-Flash-1017-UD-Q8_K_XL-00001-of-00009.gguf",
+        "mmproj-BF16.gguf",
+        "dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf"
+      ],
+      "dest": "/dev/shm/dsv41",
+      "gated": false
+    }
+  ],
+  "drive": [],
+  "outputs": null
+}

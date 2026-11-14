@@ -1,0 +1,29 @@
+{
+  "hf": [
+    {
+      "repo": "Abiray/DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-GGUF",
+      "files": [
+        "DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-IQ2_XXS-00001-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-IQ2_XXS-00002-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-IQ2_XXS-00003-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-IQ2_XXS-00004-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-1017-Uncensored-GSQ-RCO-Coder-IQ2_XXS-00005-of-00006.gguf",
+        "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf"
+      ],
+      "dest": "/content/models/dsv41-coder",
+      "gated": false
+    },
+    {
+      "repo": "unsloth/DeepSeek-V4.1-Flash-1017-GGUF",
+      "revision": "8a6ec9cf118e785a362ea94ee123c61c70553be6",
+      "files": [
+        "mmproj-BF16.gguf",
+        "dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf"
+      ],
+      "dest": "/dev/shm/dsv41",
+      "gated": false
+    }
+  ],
+  "drive": [],
+  "outputs": null
+}
