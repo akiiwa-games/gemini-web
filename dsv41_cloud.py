@@ -231,7 +231,13 @@ def build_cloud_health() -> dict:
     if isinstance(upstream_health, dict) and (upstream_health.get("status") == "ok" or upstream_health.get("loaded") is True):
         try:
             with urllib.request.urlopen(f"http://{UPSTREAM_HOST}:{UPSTREAM_PORT}/metrics", timeout=1.2) as r:
-                upstream_metrics = json.loads(r.read().decode("utf-8"))
+                raw_m = json.loads(r.read().decode("utf-8"))
+                if isinstance(raw_m, dict):
+                    upstream_metrics = {
+                        "engine": raw_m.get("engine"),
+                        "live": raw_m.get("live"),
+                        "summary": raw_m.get("summary"),
+                    }
         except Exception:
             pass
 
@@ -721,7 +727,7 @@ def main() -> int:
         st.flush()
 
         internal_port = int(cfg["internal_port"])
-        context_len = int(cfg.get("context", 65536))
+        context_len = int(cfg.get("context", 262144))
         parallel_n = int(cfg.get("parallel", 2))
 
         run_cfg = {
@@ -750,24 +756,34 @@ def main() -> int:
         run_cfg_path = Path("/content/strata-dsv41.json")
         run_cfg_path.write_text(json.dumps(run_cfg, indent=2), encoding="utf-8")
 
-        subprocess.run(["pkill", "-f", "serve.server"], check=False)
-        subprocess.run(["pkill", "-f", "strata-dsv41"], check=False)
+        already_ready = False
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{internal_port}/health", timeout=2) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                if body.get("status") == "ok" or body.get("loaded") is True:
+                    already_ready = True
+        except Exception:
+            pass
 
-        env = os.environ.copy()
-        env["PYTHONPATH"] = f"{strata_root}:{strata_root / 'tools'}"
-        env["LD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('LD_LIBRARY_PATH', '')}"
+        if not already_ready:
+            subprocess.run(["pkill", "-f", "serve.server"], check=False)
+            subprocess.run(["pkill", "-f", "strata-dsv41"], check=False)
 
-        srv_log = open("/content/strata-server.log", "ab")
-        subprocess.Popen(
-            [sys.executable, "-m", "serve.server", "--engine", "strata", "--config", str(run_cfg_path),
-             "--host", "127.0.0.1", "--port", str(internal_port)],
-            cwd=str(strata_root),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=srv_log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+            env = os.environ.copy()
+            env["PYTHONPATH"] = f"{strata_root}:{strata_root / 'tools'}"
+            env["LD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('LD_LIBRARY_PATH', '')}"
+
+            srv_log = open("/content/strata-server.log", "ab")
+            subprocess.Popen(
+                [sys.executable, "-m", "serve.server", "--engine", "strata", "--config", str(run_cfg_path),
+                 "--host", "127.0.0.1", "--port", str(internal_port)],
+                cwd=str(strata_root),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=srv_log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
         t0 = time.time()
         while time.time() - t0 < 1200:
@@ -912,24 +928,29 @@ subprocess.Popen(
     start_new_session=True,
 )
 
-# 3. Start background cloud_worker.py (downloads engine + HF weights, packs, starts Strata)
-subprocess.run(["pkill", "-f", "cloud_worker.py"], check=False)
-wk_log = open("/content/cloud-worker.log", "ab")
-wk_proc = subprocess.Popen(
-    [sys.executable, str(strata_root / "cloud_worker.py")],
-    cwd=str(strata_root),
-    env=env,
-    stdin=subprocess.DEVNULL,
-    stdout=wk_log,
-    stderr=subprocess.STDOUT,
-    start_new_session=True,
-)
+# 3. Start background cloud_worker.py only if neither cloud_worker.py nor strata-dsv41 is already active
+existing_wk = subprocess.run(["pgrep", "-f", "cloud_worker.py|strata-dsv41"], capture_output=True, text=True).stdout.strip()
+if existing_wk:
+    wk_pid = int(existing_wk.splitlines()[0])
+else:
+    wk_log = open("/content/cloud-worker.log", "ab")
+    wk_proc = subprocess.Popen(
+        [sys.executable, str(strata_root / "cloud_worker.py")],
+        cwd=str(strata_root),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=wk_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    wk_pid = wk_proc.pid
 
 time.sleep(3.5)
 peer_out = subprocess.run([str(et_cli), "peer"], capture_output=True, text=True).stdout
 print("BOOTSTRAP", json.dumps({
     "status": "bootstrapped",
-    "worker_pid": wk_proc.pid,
+    "worker_pid": wk_pid,
+    "reused_worker": bool(existing_wk),
     "easytier_ip": cfg["easytier_ip"],
     "port": cfg["port"],
     "peers": peer_out.strip(),
@@ -1096,7 +1117,7 @@ def main(argv: list[str] | None = None) -> int:
     p_u.add_argument("--variant", default="coder", choices=("coder", "2.00bpw"))
     p_u.add_argument("--session", default=DEFAULT_SESSION)
     p_u.add_argument("--idle-minutes", type=int, default=120)
-    p_u.add_argument("--context", type=int, default=65536)
+    p_u.add_argument("--context", type=int, default=262144)
     p_u.add_argument("--parallel", type=int, default=2)
     p_u.add_argument("--et-ip", default=DEFAULT_ET_IP)
     p_u.add_argument("--no-wait", action="store_true", help="Return right after EasyTier + Gateway bootstrap (~25s)")
