@@ -235,8 +235,9 @@ def build_cloud_health() -> dict:
                 if isinstance(raw_m, dict):
                     upstream_metrics = {
                         "engine": raw_m.get("engine"),
-                        "live": raw_m.get("live"),
-                        "summary": raw_m.get("summary"),
+                        "totals": raw_m.get("totals"),
+                        "conversation_cache": raw_m.get("conversation_cache"),
+                        "requests": (raw_m.get("requests") or [])[:5],
                     }
         except Exception:
             pass
@@ -754,28 +755,44 @@ def main() -> int:
             "open_browser": False,
         }
         run_cfg_path = Path("/content/strata-dsv41.json")
+        prev_cfg = None
+        if run_cfg_path.is_file():
+            try:
+                prev_cfg = json.loads(run_cfg_path.read_text(encoding="utf-8"))
+            except Exception:
+                prev_cfg = None
         run_cfg_path.write_text(json.dumps(run_cfg, indent=2), encoding="utf-8")
 
         already_ready = False
-        try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{internal_port}/health", timeout=2) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-                if body.get("status") == "ok" or body.get("loaded") is True:
-                    already_ready = True
-        except Exception:
-            pass
+        if prev_cfg == run_cfg:
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{internal_port}/health", timeout=2) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                    if body.get("status") == "ok" or body.get("loaded") is True:
+                        already_ready = True
+            except Exception:
+                pass
 
         if not already_ready:
+            import socket
             subprocess.run(["pkill", "-9", "-f", "strata-dsv41"], check=False)
             subprocess.run(["pkill", "-9", "-f", "serve.server"], check=False)
-            time.sleep(1.5)
+            kill_t0 = time.time()
+            while time.time() - kill_t0 < 15:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(0.5)
+                    in_use = (sock.connect_ex(("127.0.0.1", internal_port)) == 0)
+                if not in_use:
+                    break
+                subprocess.run(["pkill", "-9", "-f", "serve.server"], check=False)
+                time.sleep(0.5)
 
             env = os.environ.copy()
             env["PYTHONPATH"] = f"{strata_root}:{strata_root / 'tools'}"
             env["LD_LIBRARY_PATH"] = f"{lib_dir}:{env.get('LD_LIBRARY_PATH', '')}"
 
-            srv_log = open("/content/strata-server.log", "ab")
-            subprocess.Popen(
+            srv_log = open("/content/strata-server.log", "wb")
+            srv_proc = subprocess.Popen(
                 [sys.executable, "-m", "serve.server", "--engine", "strata", "--config", str(run_cfg_path),
                  "--host", "127.0.0.1", "--port", str(internal_port)],
                 cwd=str(strata_root),
@@ -785,6 +802,8 @@ def main() -> int:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        else:
+            srv_proc = None
 
         t0 = time.time()
         while time.time() - t0 < 1200:
@@ -798,6 +817,11 @@ def main() -> int:
                         return 0
             except Exception:
                 pass
+            if srv_proc is not None and srv_proc.poll() is not None:
+                st.phase = "error"
+                st.phase_label = f"引擎进程提前退出 (code={srv_proc.returncode})"
+                st.log(f"serve.server exited early with code {srv_proc.returncode}")
+                return 1
             st.flush()
             time.sleep(3)
 
@@ -929,29 +953,27 @@ subprocess.Popen(
     start_new_session=True,
 )
 
-# 3. Start background cloud_worker.py only if neither cloud_worker.py nor strata-dsv41 is already active
-existing_wk = subprocess.run(["pgrep", "-f", "cloud_worker.py|strata-dsv41"], capture_output=True, text=True).stdout.strip()
-if existing_wk:
-    wk_pid = int(existing_wk.splitlines()[0])
-else:
-    wk_log = open("/content/cloud-worker.log", "ab")
-    wk_proc = subprocess.Popen(
-        [sys.executable, str(strata_root / "cloud_worker.py")],
-        cwd=str(strata_root),
-        env=env,
-        stdin=subprocess.DEVNULL,
-        stdout=wk_log,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    wk_pid = wk_proc.pid
+# 3. Restart background cloud_worker.py cleanly with newly uploaded config/code
+subprocess.run(["pkill", "-9", "-f", "cloud_worker.py"], check=False)
+time.sleep(0.5)
+wk_log = open("/content/cloud-worker.log", "wb")
+wk_proc = subprocess.Popen(
+    [sys.executable, str(strata_root / "cloud_worker.py")],
+    cwd=str(strata_root),
+    env=env,
+    stdin=subprocess.DEVNULL,
+    stdout=wk_log,
+    stderr=subprocess.STDOUT,
+    start_new_session=True,
+)
+wk_pid = wk_proc.pid
 
 time.sleep(3.5)
 peer_out = subprocess.run([str(et_cli), "peer"], capture_output=True, text=True).stdout
 print("BOOTSTRAP", json.dumps({
     "status": "bootstrapped",
     "worker_pid": wk_pid,
-    "reused_worker": bool(existing_wk),
+    "reused_worker": False,
     "easytier_ip": cfg["easytier_ip"],
     "port": cfg["port"],
     "peers": peer_out.strip(),
@@ -972,6 +994,20 @@ def allocate_gpu_session(account: str, gpu: str, session: str, idle_minutes: int
 
     existing = cw.load_state(name).get("sessions", {}).get(session)
     if not existing:
+        sess_res = cw.run_cli(name, "sessions", timeout=30)
+        if sess_res.returncode == 0 and f"[{session}]" in (sess_res.stdout or ""):
+            cw.update_session(
+                name,
+                session,
+                created_at=cw.utc_now(),
+                last_used=cw.utc_now(),
+                gpu=gpu or "cpu",
+                profile="dsv41-cloud",
+                idle_minutes=idle_minutes,
+                outputs=None,
+                mounted=False,
+            )
+            return {"status": "ready", "account": name, "session": session, "reused": True, "recovered": True}
         args = ["new", "-s", session] + (["--gpu", gpu] if gpu else [])
         t0 = time.monotonic()
         try:
@@ -1056,7 +1092,8 @@ def cmd_up(
                 last_keepalive = time.monotonic()
 
             try:
-                with urllib.request.urlopen(f"http://{ip}:{port}/health", timeout=3) as resp:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(f"http://{ip}:{port}/health", timeout=4.0) as resp:
                     h = json.loads(resp.read().decode("utf-8"))
                     phase = h.get("phase")
                     print(
@@ -1092,7 +1129,8 @@ def cmd_status(account: str | None, et_ip: str, include_colab: bool = True) -> d
     port = cloud_cfg["port"]
     health_status = None
     try:
-        with urllib.request.urlopen(f"http://{ip}:{port}/health", timeout=2.0) as resp:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://{ip}:{port}/health", timeout=4.0) as resp:
             health_status = json.loads(resp.read().decode("utf-8"))
             health_status["reachable"] = True
     except Exception as exc:
