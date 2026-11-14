@@ -766,8 +766,9 @@ def main() -> int:
             pass
 
         if not already_ready:
-            subprocess.run(["pkill", "-f", "serve.server"], check=False)
-            subprocess.run(["pkill", "-f", "strata-dsv41"], check=False)
+            subprocess.run(["pkill", "-9", "-f", "strata-dsv41"], check=False)
+            subprocess.run(["pkill", "-9", "-f", "serve.server"], check=False)
+            time.sleep(1.5)
 
             env = os.environ.copy()
             env["PYTHONPATH"] = f"{strata_root}:{strata_root / 'tools'}"
